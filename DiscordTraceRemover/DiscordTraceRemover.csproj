@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>DiscordTraceRemover</AssemblyName>
+    <RootNamespace>DiscordTraceRemover</RootNamespace>
+    <Title>Discord Trace Remover</Title>
+    <Product>Discord Trace Remover</Product>
+    <Description>Removes Discord desktop, browser, registration, Android, and iOS data for a clean reinstall.</Description>
+  </PropertyGroup>
+
+</Project>
