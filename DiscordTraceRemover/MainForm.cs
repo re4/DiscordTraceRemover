@@ -440,7 +440,7 @@ internal sealed class MainForm : Form
         };
         notice.Controls.Add(new Label
         {
-            Text = "ⓘ  Close selected browsers. Mobile tools install on demand. Connect exactly one authorized or trusted USB device.",
+            Text = "ⓘ  Selected browsers close during cleanup. Save browser work first. Mobile tools install on demand.",
             Dock = DockStyle.Fill,
             ForeColor = DiscordTheme.MutedText,
             Font = new Font("Segoe UI", 8.75F),
@@ -614,7 +614,8 @@ internal sealed class MainForm : Form
         var confirmation = MessageBox.Show(
             this,
             $"Permanently remove {preview.Items.Count} detected Discord cleanup target(s)?\n\n" +
-            "Discord will be closed. Close each selected browser before continuing. This cannot be undone." +
+            "Discord and selected browsers will be closed. Any unsaved forms, private windows, or active " +
+            "downloads in those browsers may be lost. This cannot be undone." +
             mobileWarning,
             "Confirm Discord cleanup",
             MessageBoxButtons.YesNo,

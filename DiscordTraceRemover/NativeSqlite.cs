@@ -5,6 +5,7 @@ namespace DiscordTraceRemover;
 internal static class NativeSqlite
 {
     private const int Ok = 0;
+    private const int CheckpointTruncate = 3;
 
     [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
     private static extern int sqlite3_open16(nint fileName, out nint database);
@@ -26,6 +27,17 @@ internal static class NativeSqlite
     [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
     private static extern int sqlite3_total_changes(nint database);
 
+    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern nint sqlite3_errmsg(nint database);
+
+    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int sqlite3_wal_checkpoint_v2(
+        nint database,
+        nint databaseName,
+        int mode,
+        out int logFrames,
+        out int checkpointedFrames);
+
     internal static int Execute(string databasePath, string sql)
     {
         nint database = 0;
@@ -35,7 +47,11 @@ internal static class NativeSqlite
             var openResult = sqlite3_open16(pathPointer, out database);
             if (openResult != Ok)
             {
-                throw new InvalidOperationException($"Could not open Chrome database (SQLite error {openResult}).");
+                var details = database == 0
+                    ? null
+                    : Marshal.PtrToStringUTF8(sqlite3_errmsg(database));
+                throw new InvalidOperationException(
+                    $"Could not open browser database (SQLite error {openResult}: {details ?? "unknown error"}).");
             }
 
             var result = sqlite3_exec(database, sql, 0, 0, out var errorPointer);
@@ -59,7 +75,21 @@ internal static class NativeSqlite
                 throw new InvalidOperationException(error);
             }
 
-            return sqlite3_total_changes(database);
+            var changes = sqlite3_total_changes(database);
+            var checkpointResult = sqlite3_wal_checkpoint_v2(
+                database,
+                0,
+                CheckpointTruncate,
+                out var logFrames,
+                out var checkpointedFrames);
+            if (checkpointResult != Ok || (logFrames > 0 && checkpointedFrames < logFrames))
+            {
+                var details = Marshal.PtrToStringUTF8(sqlite3_errmsg(database));
+                throw new InvalidOperationException(
+                    $"Could not finalize the browser database safely (SQLite error {checkpointResult}: {details ?? "unknown error"}).");
+            }
+
+            return changes;
         }
         finally
         {

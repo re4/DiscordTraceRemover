@@ -134,6 +134,7 @@ internal static class Program
                 INSERT INTO webappsstore2(originKey) VALUES ('moc.drocsid.:https:443'), ('moc.elpmaxe.:https:443');
                 INSERT INTO moz_perms(origin) VALUES ('https://discord.com'), ('https://example.com');
                 """);
+            File.WriteAllBytes(database + "-journal", []);
 
             if (!CleanupEngine.DeleteChromiumDiscordCookies(database, null) ||
                 CleanupEngine.DeleteChromiumDiscordCookies(database, null) ||
@@ -161,6 +162,9 @@ internal static class Program
             try
             {
                 File.Delete(database);
+                File.Delete(database + "-journal");
+                File.Delete(database + "-wal");
+                File.Delete(database + "-shm");
             }
             catch
             {

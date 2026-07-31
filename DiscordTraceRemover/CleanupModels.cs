@@ -35,4 +35,5 @@ internal sealed record PreviewResult(IReadOnlyList<CleanupItem> Items);
 internal sealed record CleanupResult(int Succeeded, int Failed, int Skipped);
 
 internal sealed class BrowserIsRunningException(string browserName)
-    : InvalidOperationException($"{browserName} is open. Close every {browserName} window, then run the cleanup again.");
+    : InvalidOperationException(
+        $"{browserName} is still running and could not be closed automatically. End it in Task Manager, then try again.");

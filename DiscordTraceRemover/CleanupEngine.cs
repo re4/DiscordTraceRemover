@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using Microsoft.Win32;
 
 namespace DiscordTraceRemover;
@@ -124,19 +125,21 @@ internal static class CleanupEngine
         Action<string>? report = null,
         IReadOnlyList<CleanupItem>? confirmedTargets = null)
     {
-        if (options.ChromeData && IsProcessRunning("chrome"))
+        var targets = confirmedTargets ?? Discover(options);
+
+        if (options.ChromeData && targets.Any(item => item.Category.Equals("Chrome", StringComparison.OrdinalIgnoreCase)))
         {
-            throw new BrowserIsRunningException("Google Chrome");
+            StopBrowser("chrome", "Google Chrome", report);
         }
 
-        if (options.EdgeData && IsProcessRunning("msedge"))
+        if (options.EdgeData && targets.Any(item => item.Category.Equals("Edge", StringComparison.OrdinalIgnoreCase)))
         {
-            throw new BrowserIsRunningException("Microsoft Edge");
+            StopBrowser("msedge", "Microsoft Edge", report);
         }
 
-        if (options.FirefoxData && IsProcessRunning("firefox"))
+        if (options.FirefoxData && targets.Any(item => item.Category.Equals("Firefox", StringComparison.OrdinalIgnoreCase)))
         {
-            throw new BrowserIsRunningException("Mozilla Firefox");
+            StopBrowser("firefox", "Mozilla Firefox", report);
         }
 
         if (options.DesktopData)
@@ -155,7 +158,7 @@ internal static class CleanupEngine
         var skipped = 0;
         var failedLocations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var item in confirmedTargets ?? Discover(options))
+        foreach (var item in targets)
         {
             try
             {
@@ -951,7 +954,7 @@ internal static class CleanupEngine
             COMMIT;
             """;
 
-        var rows = NativeSqlite.Execute(databasePath, sql);
+        var rows = ExecuteBrowserDatabaseCleanup(databasePath, sql);
         report?.Invoke($"  Removed {rows} Discord cookie record(s).");
         return rows > 0;
     }
@@ -981,7 +984,7 @@ internal static class CleanupEngine
             COMMIT;
             """;
 
-        var rows = NativeSqlite.Execute(databasePath, sql);
+        var rows = ExecuteBrowserDatabaseCleanup(databasePath, sql);
         report?.Invoke($"  Removed {rows} Firefox Discord cookie record(s).");
         return rows > 0;
     }
@@ -1005,7 +1008,7 @@ internal static class CleanupEngine
             COMMIT;
             """;
 
-        var rows = NativeSqlite.Execute(databasePath, sql);
+        var rows = ExecuteBrowserDatabaseCleanup(databasePath, sql);
         report?.Invoke($"  Removed {rows} Firefox Discord legacy storage record(s).");
         return rows > 0;
     }
@@ -1035,9 +1038,159 @@ internal static class CleanupEngine
             COMMIT;
             """;
 
-        var rows = NativeSqlite.Execute(databasePath, sql);
+        var rows = ExecuteBrowserDatabaseCleanup(databasePath, sql);
         report?.Invoke($"  Removed {rows} Firefox Discord permission record(s).");
         return rows > 0;
+    }
+
+    private static int ExecuteBrowserDatabaseCleanup(string databasePath, string sql)
+    {
+        EnsureBrowserForDatabaseIsClosed(databasePath);
+        EnsureNoPendingSqliteJournal(databasePath);
+
+        var stagingParent = Path.Combine(Path.GetTempPath(), "DiscordTraceRemover", "browser-databases");
+        var databaseRoot = Path.GetPathRoot(Path.GetFullPath(databasePath));
+        var stagingRoot = Path.GetPathRoot(Path.GetFullPath(stagingParent));
+        if (!string.Equals(databaseRoot, stagingRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "The browser database and temporary folder are on different drives, so an atomic update is not possible.");
+        }
+
+        Directory.CreateDirectory(stagingParent);
+        var operationDirectory = Path.Combine(stagingParent, Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(operationDirectory);
+        var workingDatabase = Path.Combine(operationDirectory, "browser.sqlite");
+
+        try
+        {
+            var originalHash = HashFile(databasePath);
+            File.Copy(databasePath, workingDatabase, overwrite: false);
+            if (!CryptographicOperations.FixedTimeEquals(originalHash, HashFile(workingDatabase)))
+            {
+                throw new IOException("The browser database changed while its safe working copy was being created.");
+            }
+
+            var changes = NativeSqlite.Execute(workingDatabase, sql);
+            EnsureNoPendingSqliteJournal(workingDatabase);
+
+            EnsureBrowserForDatabaseIsClosed(databasePath);
+            EnsureNoPendingSqliteJournal(databasePath);
+            if (!CryptographicOperations.FixedTimeEquals(originalHash, HashFile(databasePath)))
+            {
+                throw new IOException(
+                    "The browser database changed during cleanup. Keep the browser closed and try again.");
+            }
+
+            File.Replace(workingDatabase, databasePath, null, ignoreMetadataErrors: true);
+            return changes;
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            throw CreateBrowserProtectionException(ex);
+        }
+        finally
+        {
+            SafeDeleteBrowserStaging(operationDirectory, stagingParent);
+        }
+    }
+
+    private static UnauthorizedAccessException CreateBrowserProtectionException(UnauthorizedAccessException inner)
+    {
+        var executable = Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, "DiscordTraceRemover.exe");
+        if (IsEsetSecurityInstalled())
+        {
+            return new UnauthorizedAccessException(
+                "ESET Enhanced data protection blocked the browser profile. In ESET, open Advanced setup (F5) > " +
+                "Protections > Browser protection > Browser protection allowlist, add this cleaner, then retry. " +
+                $"Cleaner path: {executable}",
+                inner);
+        }
+
+        return new UnauthorizedAccessException(
+            "Security software blocked the browser profile. Add this cleaner to its browser-protection allowlist, " +
+            $"then retry. Cleaner path: {executable}",
+            inner);
+    }
+
+    private static bool IsEsetSecurityInstalled()
+    {
+        foreach (var programFiles in new[]
+                 {
+                     Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                     Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86)
+                 }.Where(path => !string.IsNullOrWhiteSpace(path)).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (File.Exists(Path.Combine(programFiles, "ESET", "ESET Security", "ekrn.exe")) ||
+                Directory.Exists(Path.Combine(programFiles, "ESET", "ESET Security")))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static void EnsureBrowserForDatabaseIsClosed(string databasePath)
+    {
+        var fullPath = Path.GetFullPath(databasePath);
+        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        var chromeRoot = Path.Combine(local, "Google", "Chrome", "User Data");
+        var edgeRoot = Path.Combine(local, "Microsoft", "Edge", "User Data");
+        var firefoxRoot = Path.Combine(roaming, "Mozilla", "Firefox");
+
+        if (IsPathWithin(fullPath, chromeRoot) && IsProcessRunning("chrome"))
+        {
+            throw new BrowserIsRunningException("Google Chrome");
+        }
+
+        if (IsPathWithin(fullPath, edgeRoot) && IsProcessRunning("msedge"))
+        {
+            throw new BrowserIsRunningException("Microsoft Edge");
+        }
+
+        if (IsPathWithin(fullPath, firefoxRoot) && IsProcessRunning("firefox"))
+        {
+            throw new BrowserIsRunningException("Mozilla Firefox");
+        }
+    }
+
+    private static void EnsureNoPendingSqliteJournal(string databasePath)
+    {
+        foreach (var suffix in new[] { "-wal", "-journal" })
+        {
+            var sidecar = databasePath + suffix;
+            if (File.Exists(sidecar) && new FileInfo(sidecar).Length > 0)
+            {
+                throw new IOException(
+                    "The browser database still has pending changes. Keep the browser closed for a few seconds and try again.");
+            }
+        }
+    }
+
+    private static byte[] HashFile(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        return SHA256.HashData(stream);
+    }
+
+    private static void SafeDeleteBrowserStaging(string operationDirectory, string stagingParent)
+    {
+        if (!Directory.Exists(operationDirectory))
+        {
+            return;
+        }
+
+        var approvedRoot = Path.GetFullPath(stagingParent).TrimEnd(Path.DirectorySeparatorChar) +
+                           Path.DirectorySeparatorChar;
+        var target = Path.GetFullPath(operationDirectory);
+        if (!target.StartsWith(approvedRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("Refused to remove a browser working folder outside the approved temporary root.");
+        }
+
+        Directory.Delete(target, recursive: true);
     }
 
     private static bool IsProcessRunning(string processName)
@@ -1054,6 +1207,99 @@ internal static class CleanupEngine
                 process.Dispose();
             }
         }
+    }
+
+    private static void StopBrowser(string processName, string displayName, Action<string>? report)
+    {
+        var initialProcesses = Process.GetProcessesByName(processName);
+        if (initialProcesses.Length == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            foreach (var process in initialProcesses)
+            {
+                try
+                {
+                    if (!process.HasExited)
+                    {
+                        process.CloseMainWindow();
+                    }
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+                {
+                    // The process exited while it was being inspected.
+                }
+            }
+
+            Thread.Sleep(1_200);
+        }
+        finally
+        {
+            foreach (var process in initialProcesses)
+            {
+                process.Dispose();
+            }
+        }
+
+        var forced = false;
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var remaining = Process.GetProcessesByName(processName);
+            if (remaining.Length == 0)
+            {
+                break;
+            }
+
+            forced = true;
+            try
+            {
+                foreach (var process in remaining)
+                {
+                    try
+                    {
+                        if (!process.HasExited)
+                        {
+                            process.Kill(entireProcessTree: true);
+                        }
+                    }
+                    catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+                    {
+                        // A final process check below determines whether cleanup can continue safely.
+                    }
+                }
+
+                foreach (var process in remaining)
+                {
+                    try
+                    {
+                        process.WaitForExit(2_000);
+                    }
+                    catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+                    {
+                        // A final process check below determines whether cleanup can continue safely.
+                    }
+                }
+            }
+            finally
+            {
+                foreach (var process in remaining)
+                {
+                    process.Dispose();
+                }
+            }
+
+            Thread.Sleep(200);
+        }
+
+        if (IsProcessRunning(processName))
+        {
+            throw new BrowserIsRunningException(displayName);
+        }
+
+        report?.Invoke(forced ? $"Force-closed {displayName}." : $"Closed {displayName}.");
     }
 
     private static void StopDiscord(Action<string>? report)

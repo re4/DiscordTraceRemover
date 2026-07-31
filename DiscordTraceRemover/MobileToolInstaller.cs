@@ -160,6 +160,8 @@ internal static class MobileToolInstaller
         {
             throw new InvalidOperationException("iOS dependency download allowlist test failed.");
         }
+
+        RunSignaturePathHandoffSelfTest();
     }
 
     private static async Task DownloadAsync(
@@ -343,6 +345,47 @@ internal static class MobileToolInstaller
 
     private static void VerifyGoogleSignature(string adb)
     {
+        var powershell = FindWindowsPowerShell();
+
+        const string script =
+            "$p=$env:DISCORD_TRACE_REMOVER_SIGNATURE_PATH; " +
+            "if([string]::IsNullOrWhiteSpace($p)){throw 'The signature path was not supplied.'}; " +
+            "$s=Get-AuthenticodeSignature -LiteralPath $p; " +
+            "if($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -notmatch 'O=Google LLC'){exit 9}";
+        RunTool(
+            powershell,
+            ["-NoProfile", "-NonInteractive", "-Command", script],
+            30_000,
+            new Dictionary<string, string>
+            {
+                ["DISCORD_TRACE_REMOVER_SIGNATURE_PATH"] = adb
+            });
+    }
+
+    private static void RunSignaturePathHandoffSelfTest()
+    {
+        const string marker = "DiscordTraceRemover signature path handoff";
+        var result = RunTool(
+            FindWindowsPowerShell(),
+            [
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[Console]::Out.Write($env:DISCORD_TRACE_REMOVER_SIGNATURE_PATH)"
+            ],
+            30_000,
+            new Dictionary<string, string>
+            {
+                ["DISCORD_TRACE_REMOVER_SIGNATURE_PATH"] = marker
+            });
+        if (!result.Output.Equals(marker, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("PowerShell signature path handoff test failed.");
+        }
+    }
+
+    private static string FindWindowsPowerShell()
+    {
         var powershell = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.System),
             "WindowsPowerShell",
@@ -353,10 +396,7 @@ internal static class MobileToolInstaller
             throw new InvalidOperationException("Windows PowerShell is required to verify Google's Authenticode signature.");
         }
 
-        const string script =
-            "$s=Get-AuthenticodeSignature -LiteralPath $args[0]; " +
-            "if($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -notmatch 'O=Google LLC'){exit 9}";
-        RunTool(powershell, ["-NoProfile", "-NonInteractive", "-Command", script, adb], 30_000);
+        return powershell;
     }
 
     private static void RunVersionCheck(string executable, IReadOnlyList<string> arguments, string name)
@@ -368,7 +408,11 @@ internal static class MobileToolInstaller
         }
     }
 
-    private static ToolResult RunTool(string executable, IReadOnlyList<string> arguments, int timeoutMilliseconds)
+    private static ToolResult RunTool(
+        string executable,
+        IReadOnlyList<string> arguments,
+        int timeoutMilliseconds,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
         using var process = new Process
         {
@@ -387,6 +431,13 @@ internal static class MobileToolInstaller
         foreach (var argument in arguments)
         {
             process.StartInfo.ArgumentList.Add(argument);
+        }
+        if (environment is not null)
+        {
+            foreach (var variable in environment)
+            {
+                process.StartInfo.Environment[variable.Key] = variable.Value;
+            }
         }
 
         if (!process.Start())
