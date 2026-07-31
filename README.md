@@ -1,0 +1,2 @@
+# DiscordTraceRemover
+Discord Trace Remover
